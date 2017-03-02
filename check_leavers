@@ -1,0 +1,184 @@
+#!/bin/sh
+
+# check_leavers - "Leavers" account detector plugin for Nagios
+# Version 1.0.2  (c) 2009-2017 Gareth Randall
+# Last Modified: 2017-03-02
+#
+# Important: Before using, either edit the DISALLOWED_USERS_URL line below
+# or ensure that you pass in the URL using the -u command line option.
+#
+# For description and usage, see the README.txt file.
+# License: GNU GPL 3.0+  (see LICENSE file)
+#
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+###############################################################################
+#
+# Customise this section to suit your environment:
+
+# Where is the list of disallowed users?
+# Replace YOURSERVER with an appropriate server in your network:
+DISALLOWED_USERS_URL="http://YOURSERVER/latest/check_leavers-blacklist"
+
+# How many disallowed users need to be found before reporting critical?
+# These are the default values but can be overridden using command line options.
+WARNING_LEVEL=1   # Warning if find 1 disallowed user.
+CRITICAL_LEVEL=2  # Critical if find 2 or more disallowed users.
+
+
+# The following can normally be left unchanged:
+
+# The downloaded blacklist is saved to this location:
+# (Ensure the script has write access to it.)
+DISALLOWED_USERS_FILE="/opt/nagios/var/check_leavers-blacklist"
+
+# Temporary file locations:
+# (TODO: Check if these files must be created securely.)
+ALL_USERS_TMP="/opt/nagios/var/check_leavers.all.$$"
+DISALLOWED_USERS_TMP="/opt/nagios/var/check_leavers.disallowed.$$"
+
+#
+###############################################################################
+
+
+PROGNAME=`basename $0`
+REVISION="1.0.2"
+
+# Standard Nagios exit codes
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+STATE_DEPENDENT=4
+
+print_usage() {
+    echo "Usage: $PROGNAME [-w warning_level] [-c critical_level] [-u disallowed_users_url]"
+    echo "  --help     display this help and exit"
+    echo "  --version  output version information and exit"
+}
+
+print_revision() {
+    echo "$PROGNAME $REVISION"
+}
+
+print_help() {
+    print_usage
+    echo
+    print_revision
+    echo
+    echo "'Leavers' account detector plugin for Nagios."
+    echo ""
+    echo "Highlights accounts of people who have left, so that they can"
+    echo "later be deleted."
+    echo
+    echo "A list of 'disallowed' users (blacklist) is retrieved and"
+    echo "compared to users that exist on the system. Users don't have"
+    echo "to be logged in at the time."
+    echo
+    echo "Return codes:"
+    echo "OK       if there are fewer disallowed accounts than the warning level."
+    echo "WARNING  if there are more disallowed accounts than the warning level,"
+    echo "         but fewer than the critical level."
+    echo "CRITICAL if there are more disallowed accounts than the critical level."
+    echo
+    echo "Example:"
+    echo "   check_leavers -w 1 -c 2 -u http://office-server.local/blacklist"
+}
+
+
+while test -n "$1"; do   # Incompatible with "set -u", as $1 becomes unbound.
+    case "$1" in
+        --help)
+            print_help
+            exit $STATE_OK
+            ;;
+        --version)
+            print_revision
+            exit $STATE_OK
+            ;;
+        -c)
+            CRITICAL_LEVEL=$2
+            shift
+            ;;
+        -u)
+            DISALLOWED_USERS_URL=$2
+            shift
+            ;;
+        -w)
+            WARNING_LEVEL=$2
+            shift
+            ;;
+         *)
+            print_usage
+            exit $STATE_UNKNOWN
+            ;;
+    esac
+    shift
+done
+
+set -u  # Help find any bugs.
+
+# Download the latest blacklist every time the test is run.
+# First check that the file itself can be written:
+
+touch "$DISALLOWED_USERS_FILE"
+if [ ! -w "$DISALLOWED_USERS_FILE" ] ; then
+    echo "LEAVERS error: Disallowed users file is not writeable: $DISALLOWED_USERS_FILE"
+    exit $STATE_UNKNOWN
+fi
+
+# Do the download:
+# Note: "curl" version is preferred as it doesn't overwrite file if an HTTP error occurs.
+# The equivalent "wget" version is as follows:
+#     wget -N -q "$DISALLOWED_USERS_URL" -O "$DISALLOWED_USERS_FILE"
+
+curl --fail -R -s "$DISALLOWED_USERS_URL" -o "$DISALLOWED_USERS_FILE"
+SUCCESS_FAIL="$?"
+
+if [ "$SUCCESS_FAIL" -ne 0 ] ; then
+    echo "LEAVERS error: Error downloading blacklist: $DISALLOWED_USERS_URL"
+    exit $STATE_UNKNOWN
+fi
+
+
+# Ready to do the actual checks
+
+grep -v '^#' "$DISALLOWED_USERS_FILE" | sort > "$DISALLOWED_USERS_TMP"   # comm command later expects sorted input
+cut -f 1 -d ":" "/etc/passwd" | sort > "$ALL_USERS_TMP"
+NUM_DISALLOWED=$( comm -12 "$DISALLOWED_USERS_TMP" "$ALL_USERS_TMP" | wc -l )
+DISALLOWED_USERS_FOUND=$( comm -12 "$DISALLOWED_USERS_TMP" "$ALL_USERS_TMP")
+
+rm -f "$DISALLOWED_USERS_TMP" "$ALL_USERS_TMP"
+
+
+if [ $NUM_DISALLOWED -lt $WARNING_LEVEL ]; then
+    echo "LEAVERS OK: $NUM_DISALLOWED disallowed user accounts found."
+    if [ $NUM_DISALLOWED -gt "0" ] ; then
+        echo "$DISALLOWED_USERS_FOUND"
+    fi
+    exit $STATE_OK;
+
+elif [ $NUM_DISALLOWED -lt $CRITICAL_LEVEL ]; then
+    echo "LEAVERS WARNING: $NUM_DISALLOWED disallowed user accounts found."
+    echo "$DISALLOWED_USERS_FOUND" 
+    exit $STATE_WARNING;
+
+else
+    echo "LEAVERS CRITICAL: $NUM_DISALLOWED disallowed user accounts found."
+    echo "$DISALLOWED_USERS_FOUND"
+    exit $STATE_CRITICAL;
+fi
+
